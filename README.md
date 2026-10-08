@@ -8,10 +8,16 @@ Oh My Pi extension adding `/loop-schedule`, which sends a prompt immediately and
 git clone https://github.com/fmguerreiro/omp-loop-schedule.git ~/omp-loop-schedule
 cd ~/omp-loop-schedule
 npm ci
-omp --extension "$PWD/loop-schedule.ts"
 ```
 
-`omp --extension <file>` is Oh My Pi's explicit extension-loading option. Keep the command in your usual Oh My Pi launcher or shell alias to load this extension for every session.
+Add repository's absolute path to `~/.omp/agent/config.yml`:
+
+```yaml
+extensions:
+  - /absolute/path/to/omp-loop-schedule
+```
+
+Restart Oh My Pi. For one session instead, run `omp --extension "$PWD/loop-schedule.ts"`.
 
 ## Commands
 
