@@ -17,7 +17,7 @@ extensions:
   - /absolute/path/to/omp-loop-schedule
 ```
 
-Restart Oh My Pi. For one session instead, run `omp --extension "$PWD/loop-schedule.ts"`.
+Restart Oh My Pi. For one session instead, run `omp --extension "$PWD"`.
 
 ## Commands
 
