@@ -506,13 +506,30 @@ function loopSchedule(pi) {
     ctx.clearTimer(timer);
     timer = undefined;
   }
+  async function applyLoopMode(ctx) {
+    try {
+      const { lookup } = await import("@oh-my-pi/pi-coding-agent/config/registry");
+      const mode = lookup("loop.mode")?.get(pi.pi.settings) ?? "prompt";
+      if (mode === "prompt")
+        return true;
+      if (mode === "compact") {
+        await ctx.compact();
+        return true;
+      }
+      const { cancelled } = await ctx.newSession();
+      return !cancelled;
+    } catch (err) {
+      ctx.ui.notify(`Loop schedule: failed to apply loop.mode: ${err instanceof Error ? err.message : String(err)}`, "error");
+      return false;
+    }
+  }
   function arm(ctx) {
     if (!schedule)
       return;
     clearTimer(ctx);
-    timer = ctx.setTimeout(() => tick(ctx), Math.min(MAX_TIMER_MS, Math.max(0, schedule.nextRunAt - Date.now())));
+    timer = ctx.setTimeout(() => void tick(ctx), Math.min(MAX_TIMER_MS, Math.max(0, schedule.nextRunAt - Date.now())));
   }
-  function tick(ctx) {
+  async function tick(ctx) {
     timer = undefined;
     if (!schedule)
       return;
@@ -522,7 +539,13 @@ function loopSchedule(pi) {
       return;
     }
     if (ctx.isIdle() && !ctx.hasPendingMessages()) {
-      pi.sendUserMessage(current.prompt, { attribution: "agent" });
+      const shouldSend = current.ranOnce ? await applyLoopMode(ctx) : true;
+      if (schedule !== current)
+        return;
+      if (shouldSend) {
+        pi.sendUserMessage(current.prompt);
+        current.ranOnce = true;
+      }
     }
     if (current.kind === "interval") {
       while (current.nextRunAt <= Date.now())
@@ -560,7 +583,7 @@ function loopSchedule(pi) {
           ctx.ui.notify(USAGE, "error");
           return;
         }
-        schedule = { kind: "cron", ...cronSchedule, nextRunAt };
+        schedule = { kind: "cron", ...cronSchedule, nextRunAt, ranOnce: false };
         arm(ctx);
         ctx.ui.notify(`Loop schedule started; cron ${cronSchedule.cron.getPattern()} in ${args.trim().match(/--timezone\s+(\S+)/)?.[1]}.`, "info");
         return;
@@ -573,7 +596,8 @@ function loopSchedule(pi) {
       schedule = {
         kind: "interval",
         ...parsed,
-        nextRunAt: Date.now()
+        nextRunAt: Date.now(),
+        ranOnce: false
       };
       arm(ctx);
       ctx.ui.notify(`Loop schedule started; repeating every ${args.trim().split(/\s+/, 1)[0]}.`, "info");

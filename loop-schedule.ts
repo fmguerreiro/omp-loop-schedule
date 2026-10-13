@@ -1,5 +1,5 @@
 import { Cron } from "croner";
-import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
 
 type Timer = NodeJS.Timeout;
 
@@ -8,6 +8,7 @@ type IntervalSchedule = {
 	intervalMs: number;
 	nextRunAt: number;
 	prompt: string;
+	ranOnce: boolean;
 };
 
 type CronSchedule = {
@@ -15,6 +16,7 @@ type CronSchedule = {
 	cron: Cron;
 	nextRunAt: number;
 	prompt: string;
+	ranOnce: boolean;
 };
 
 type Schedule = IntervalSchedule | CronSchedule;
@@ -29,7 +31,7 @@ const UNITS_MS: Record<string, number> = {
 	d: 86_400_000,
 };
 
-export function parseScheduleArgs(args: string): Omit<IntervalSchedule, "kind" | "nextRunAt"> | string {
+export function parseScheduleArgs(args: string): Omit<IntervalSchedule, "kind" | "nextRunAt" | "ranOnce"> | string {
 	const match = /^(\d+)\s*([smhd])\s+(.+)$/i.exec(args.trim());
 	if (!match) return USAGE;
 
@@ -49,7 +51,7 @@ function cronMatchesNow(cron: Cron, now: Date): boolean {
 }
 
 
-function parseCronArgs(args: string): Omit<CronSchedule, "kind" | "nextRunAt"> & { runOnStart: boolean } | string {
+function parseCronArgs(args: string): Omit<CronSchedule, "kind" | "nextRunAt" | "ranOnce"> & { runOnStart: boolean } | string {
 	const match =
 		/^--cron\s+(?:"([^"]*)"|'([^']*)'|(\S+))\s+--timezone\s+(\S+)(\s+--run-on-start)?\s+(.+)$/s.exec(args.trim());
 	if (!match) return USAGE;
@@ -72,19 +74,44 @@ export default function loopSchedule(pi: ExtensionAPI): void {
 	let schedule: Schedule | undefined;
 	let timer: Timer | undefined;
 
-	function clearTimer(ctx: ExtensionContext): void {
+	function clearTimer(ctx: ExtensionCommandContext): void {
 		if (!timer) return;
 		ctx.clearTimer(timer);
 		timer = undefined;
 	}
 
-	function arm(ctx: ExtensionContext): void {
-		if (!schedule) return;
-		clearTimer(ctx);
-		timer = ctx.setTimeout(() => tick(ctx), Math.min(MAX_TIMER_MS, Math.max(0, schedule.nextRunAt - Date.now())));
+	async function applyLoopMode(ctx: ExtensionCommandContext): Promise<boolean> {
+		try {
+			// `Settings` dropped its string-path `get(id)` accessor; extensions must
+			// resolve a typed descriptor via the registry and read through that.
+			const { lookup } = await import("@oh-my-pi/pi-coding-agent/config/registry");
+			const mode = lookup("loop.mode")?.get(pi.pi.settings) ?? "prompt";
+			if (mode === "prompt") return true;
+			if (mode === "compact") {
+				await ctx.compact();
+				return true;
+			}
+			const { cancelled } = await ctx.newSession();
+			return !cancelled;
+		} catch (err) {
+			ctx.ui.notify(
+				`Loop schedule: failed to apply loop.mode: ${err instanceof Error ? err.message : String(err)}`,
+				"error",
+			);
+			return false;
+		}
 	}
 
-	function tick(ctx: ExtensionContext): void {
+	function arm(ctx: ExtensionCommandContext): void {
+		if (!schedule) return;
+		clearTimer(ctx);
+		timer = ctx.setTimeout(
+			() => void tick(ctx),
+			Math.min(MAX_TIMER_MS, Math.max(0, schedule.nextRunAt - Date.now())),
+		);
+	}
+
+	async function tick(ctx: ExtensionCommandContext): Promise<void> {
 		timer = undefined;
 		if (!schedule) return;
 
@@ -95,7 +122,12 @@ export default function loopSchedule(pi: ExtensionAPI): void {
 		}
 
 		if (ctx.isIdle() && !ctx.hasPendingMessages()) {
-			pi.sendUserMessage(current.prompt, { attribution: "agent" });
+			const shouldSend = current.ranOnce ? await applyLoopMode(ctx) : true;
+			if (schedule !== current) return;
+			if (shouldSend) {
+				pi.sendUserMessage(current.prompt);
+				current.ranOnce = true;
+			}
 		}
 
 		if (current.kind === "interval") {
@@ -141,7 +173,7 @@ export default function loopSchedule(pi: ExtensionAPI): void {
 					ctx.ui.notify(USAGE, "error");
 					return;
 				}
-				schedule = { kind: "cron", ...cronSchedule, nextRunAt };
+				schedule = { kind: "cron", ...cronSchedule, nextRunAt, ranOnce: false };
 				arm(ctx);
 				ctx.ui.notify(
 					`Loop schedule started; cron ${cronSchedule.cron.getPattern()} in ${args.trim().match(/--timezone\s+(\S+)/)?.[1]}.`,
@@ -160,6 +192,7 @@ export default function loopSchedule(pi: ExtensionAPI): void {
 				kind: "interval",
 				...parsed,
 				nextRunAt: Date.now(),
+				ranOnce: false,
 			};
 			arm(ctx);
 			ctx.ui.notify(`Loop schedule started; repeating every ${args.trim().split(/\s+/, 1)[0]}.`, "info");
