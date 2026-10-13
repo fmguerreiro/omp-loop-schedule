@@ -48,6 +48,14 @@ The cron expression must have exactly five fields. `--timezone` is required and 
 
 `--run-on-start` runs the prompt immediately only when command time matches the cron schedule's current minute. Otherwise, the first run is the next cron occurrence.
 
+## Context between iterations
+
+The first run of each schedule sends the prompt as-is. Every run after that
+applies Oh My Pi's `loop.mode` setting first, same as the builtin `/loop`
+command: `prompt` (default) sends as-is, `compact` compacts context first,
+`reset` starts a new session first. `reset` means each iteration after the
+first runs in a fresh session with no memory of prior runs.
+
 Stop active schedule:
 
 ```text
