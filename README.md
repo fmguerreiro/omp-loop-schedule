@@ -56,6 +56,10 @@ command: `prompt` (default) sends as-is, `compact` compacts context first,
 `reset` starts a new session first. `reset` means each iteration after the
 first runs in a fresh session with no memory of prior runs.
 
+## Session transfers
+
+Active schedules are stored with the session and restored when Oh My Pi opens a transferred session. With `loop.mode: reset`, every iteration after the first creates a fresh session and sends the scheduled prompt there. `/loop-schedule off` records that no schedule is active.
+
 Stop active schedule:
 
 ```text

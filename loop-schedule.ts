@@ -1,5 +1,6 @@
 import { Cron } from "croner";
-import type { ExtensionAPI, ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
+import { lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 
 type Timer = NodeJS.Timeout;
 
@@ -14,12 +15,30 @@ type IntervalSchedule = {
 type CronSchedule = {
 	kind: "cron";
 	cron: Cron;
+	timezone: string;
 	nextRunAt: number;
 	prompt: string;
 	ranOnce: boolean;
 };
 
 type Schedule = IntervalSchedule | CronSchedule;
+
+type PersistedSchedule =
+	| {
+			kind: "interval";
+			intervalMs: number;
+			nextRunAt: number;
+			prompt: string;
+			ranOnce: boolean;
+	  }
+	| {
+			kind: "cron";
+			expression: string;
+			timezone: string;
+			nextRunAt: number;
+			prompt: string;
+			ranOnce: boolean;
+	  };
 
 const USAGE =
 	"Usage: /loop-schedule <number>s|m|h|d <prompt> | /loop-schedule --cron \"<minute> <hour> <day-of-month> <month> <day-of-week>\" --timezone <IANA timezone> [--run-on-start] <prompt> | /loop-schedule off";
@@ -30,6 +49,44 @@ const UNITS_MS: Record<string, number> = {
 	h: 3_600_000,
 	d: 86_400_000,
 };
+
+function isPersistedSchedule(value: unknown): value is PersistedSchedule {
+	if (!value || typeof value !== "object" || !("kind" in value)) return false;
+	if (value.kind === "interval") {
+		return (
+			"intervalMs" in value &&
+			"nextRunAt" in value &&
+			"prompt" in value &&
+			"ranOnce" in value &&
+			typeof value.intervalMs === "number" &&
+			Number.isSafeInteger(value.intervalMs) &&
+			value.intervalMs > 0 &&
+			value.intervalMs <= MAX_TIMER_MS &&
+			typeof value.nextRunAt === "number" &&
+			Number.isSafeInteger(value.nextRunAt) &&
+			typeof value.prompt === "string" &&
+			value.prompt.trim().length > 0 &&
+			typeof value.ranOnce === "boolean"
+		);
+	}
+	return (
+		value.kind === "cron" &&
+		"expression" in value &&
+		"timezone" in value &&
+		"nextRunAt" in value &&
+		"prompt" in value &&
+		"ranOnce" in value &&
+		typeof value.expression === "string" &&
+		value.expression.trim().length > 0 &&
+		typeof value.timezone === "string" &&
+		value.timezone.trim().length > 0 &&
+		typeof value.nextRunAt === "number" &&
+		Number.isSafeInteger(value.nextRunAt) &&
+		typeof value.prompt === "string" &&
+		value.prompt.trim().length > 0 &&
+		typeof value.ranOnce === "boolean"
+	);
+}
 
 export function parseScheduleArgs(args: string): Omit<IntervalSchedule, "kind" | "nextRunAt" | "ranOnce"> | string {
 	const match = /^(\d+)\s*([smhd])\s+(.+)$/i.exec(args.trim());
@@ -64,7 +121,7 @@ function parseCronArgs(args: string): Omit<CronSchedule, "kind" | "nextRunAt" | 
 		Intl.DateTimeFormat(undefined, { timeZone: match[4] });
 		const cron = new Cron(expression, { paused: true, timezone: match[4] });
 		if (nextCronRun(cron, new Date()) === undefined) return USAGE;
-		return { cron, prompt, runOnStart: Boolean(match[5]) };
+		return { cron, timezone: match[4], prompt, runOnStart: Boolean(match[5]) };
 	} catch {
 		return USAGE;
 	}
@@ -74,35 +131,94 @@ export default function loopSchedule(pi: ExtensionAPI): void {
 	let schedule: Schedule | undefined;
 	let timer: Timer | undefined;
 
-	function clearTimer(ctx: ExtensionCommandContext): void {
+	function clearTimer(ctx: ExtensionContext): void {
 		if (!timer) return;
 		ctx.clearTimer(timer);
 		timer = undefined;
 	}
 
-	async function applyLoopMode(ctx: ExtensionCommandContext): Promise<boolean> {
+	function persistedSchedule(): PersistedSchedule | null {
+		if (!schedule) return null;
+		if (schedule.kind === "interval") return schedule;
+		return {
+			kind: "cron",
+			expression: schedule.cron.getPattern(),
+			timezone: schedule.timezone,
+			nextRunAt: schedule.nextRunAt,
+			prompt: schedule.prompt,
+			ranOnce: schedule.ranOnce,
+		};
+	}
+
+	function persistSchedule(): void {
+		pi.appendEntry<PersistedSchedule | null>("loop-schedule", persistedSchedule());
+	}
+
+	function restoreSchedule(ctx: ExtensionContext): void {
+		clearTimer(ctx);
+		schedule = undefined;
+		let saved: PersistedSchedule | null | undefined;
+		for (const entry of ctx.sessionManager.getBranch()) {
+			if (entry.type !== "custom" || entry.customType !== "loop-schedule") continue;
+			if (entry.data === null) {
+				saved = null;
+			} else if (isPersistedSchedule(entry.data)) {
+				saved = entry.data;
+			}
+		}
+		if (!saved) return;
+
+		if (saved.kind === "interval") {
+			schedule = saved;
+		} else {
+			try {
+				schedule = {
+					kind: "cron",
+					cron: new Cron(saved.expression, { paused: true, timezone: saved.timezone }),
+					timezone: saved.timezone,
+					nextRunAt: saved.nextRunAt,
+					prompt: saved.prompt,
+					ranOnce: saved.ranOnce,
+				};
+			} catch {
+				ctx.ui.notify("Loop schedule stopped: saved cron is invalid.", "error");
+				return;
+			}
+		}
+		arm(ctx);
+	}
+
+	async function applyLoopMode(ctx: ExtensionContext, prompt: string): Promise<"send" | "reset" | "stop"> {
 		try {
 			// `Settings` dropped its string-path `get(id)` accessor; extensions must
 			// resolve a typed descriptor via the registry and read through that.
-			const { lookup } = await import("@oh-my-pi/pi-coding-agent/config/registry");
 			const mode = lookup("loop.mode")?.get(pi.pi.settings) ?? "prompt";
-			if (mode === "prompt") return true;
+			if (mode === "prompt") return "send";
 			if (mode === "compact") {
 				await ctx.compact();
-				return true;
+				return "send";
 			}
-			const { cancelled } = await ctx.newSession();
-			return !cancelled;
+			if (
+				ctx.deferSessionReset(prompt, async sessionManager => {
+					sessionManager.appendCustomEntry("loop-schedule", persistedSchedule());
+				})
+			) {
+				return "reset";
+			}
+			schedule = undefined;
+			persistSchedule();
+			ctx.ui.notify("Loop schedule stopped: loop.mode=reset is unavailable.", "error");
+			return "stop";
 		} catch (err) {
 			ctx.ui.notify(
 				`Loop schedule: failed to apply loop.mode: ${err instanceof Error ? err.message : String(err)}`,
 				"error",
 			);
-			return false;
+			return "stop";
 		}
 	}
 
-	function arm(ctx: ExtensionCommandContext): void {
+	function arm(ctx: ExtensionContext): void {
 		if (!schedule) return;
 		clearTimer(ctx);
 		timer = ctx.setTimeout(
@@ -111,7 +227,7 @@ export default function loopSchedule(pi: ExtensionAPI): void {
 		);
 	}
 
-	async function tick(ctx: ExtensionCommandContext): Promise<void> {
+	async function tick(ctx: ExtensionContext): Promise<void> {
 		timer = undefined;
 		if (!schedule) return;
 
@@ -122,11 +238,14 @@ export default function loopSchedule(pi: ExtensionAPI): void {
 		}
 
 		if (ctx.isIdle() && !ctx.hasPendingMessages()) {
-			const shouldSend = current.ranOnce ? await applyLoopMode(ctx) : true;
+			const action = current.ranOnce ? await applyLoopMode(ctx, current.prompt) : "send";
 			if (schedule !== current) return;
-			if (shouldSend) {
+			if (action === "send") {
 				pi.sendUserMessage(current.prompt);
+			}
+			if (action !== "stop") {
 				current.ranOnce = true;
+				persistSchedule();
 			}
 		}
 
@@ -136,11 +255,13 @@ export default function loopSchedule(pi: ExtensionAPI): void {
 			const nextRunAt = nextCronRun(current.cron, new Date());
 			if (nextRunAt === undefined) {
 				schedule = undefined;
+				persistSchedule();
 				ctx.ui.notify("Loop schedule stopped: no future cron occurrence.", "error");
 				return;
 			}
 			current.nextRunAt = nextRunAt;
 		}
+		persistSchedule();
 
 		arm(ctx);
 	}
@@ -152,6 +273,7 @@ export default function loopSchedule(pi: ExtensionAPI): void {
 			if (args.trim() === "off") {
 				schedule = undefined;
 				clearTimer(ctx);
+				persistSchedule();
 				ctx.ui.notify("Loop schedule stopped.", "info");
 				return;
 			}
@@ -174,6 +296,7 @@ export default function loopSchedule(pi: ExtensionAPI): void {
 					return;
 				}
 				schedule = { kind: "cron", ...cronSchedule, nextRunAt, ranOnce: false };
+				persistSchedule();
 				arm(ctx);
 				ctx.ui.notify(
 					`Loop schedule started; cron ${cronSchedule.cron.getPattern()} in ${args.trim().match(/--timezone\s+(\S+)/)?.[1]}.`,
@@ -194,8 +317,17 @@ export default function loopSchedule(pi: ExtensionAPI): void {
 				nextRunAt: Date.now(),
 				ranOnce: false,
 			};
+			persistSchedule();
 			arm(ctx);
 			ctx.ui.notify(`Loop schedule started; repeating every ${args.trim().split(/\s+/, 1)[0]}.`, "info");
 		},
+	});
+
+	pi.on("session_start", async (_event, ctx) => {
+		restoreSchedule(ctx);
+	});
+
+	pi.on("session_switch", async (_event, ctx) => {
+		restoreSchedule(ctx);
 	});
 }

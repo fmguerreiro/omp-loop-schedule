@@ -454,6 +454,7 @@ var R = class {
 };
 
 // loop-schedule.ts
+import { lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
 var USAGE = 'Usage: /loop-schedule <number>s|m|h|d <prompt> | /loop-schedule --cron "<minute> <hour> <day-of-month> <month> <day-of-week>" --timezone <IANA timezone> [--run-on-start] <prompt> | /loop-schedule off';
 var MAX_TIMER_MS = 2147483647;
 var UNITS_MS = {
@@ -462,6 +463,14 @@ var UNITS_MS = {
   h: 3600000,
   d: 86400000
 };
+function isPersistedSchedule(value) {
+  if (!value || typeof value !== "object" || !("kind" in value))
+    return false;
+  if (value.kind === "interval") {
+    return "intervalMs" in value && "nextRunAt" in value && "prompt" in value && "ranOnce" in value && typeof value.intervalMs === "number" && Number.isSafeInteger(value.intervalMs) && value.intervalMs > 0 && value.intervalMs <= MAX_TIMER_MS && typeof value.nextRunAt === "number" && Number.isSafeInteger(value.nextRunAt) && typeof value.prompt === "string" && value.prompt.trim().length > 0 && typeof value.ranOnce === "boolean";
+  }
+  return value.kind === "cron" && "expression" in value && "timezone" in value && "nextRunAt" in value && "prompt" in value && "ranOnce" in value && typeof value.expression === "string" && value.expression.trim().length > 0 && typeof value.timezone === "string" && value.timezone.trim().length > 0 && typeof value.nextRunAt === "number" && Number.isSafeInteger(value.nextRunAt) && typeof value.prompt === "string" && value.prompt.trim().length > 0 && typeof value.ranOnce === "boolean";
+}
 function parseScheduleArgs(args) {
   const match = /^(\d+)\s*([smhd])\s+(.+)$/i.exec(args.trim());
   if (!match)
@@ -492,7 +501,7 @@ function parseCronArgs(args) {
     const cron = new R(expression, { paused: true, timezone: match[4] });
     if (nextCronRun(cron, new Date) === undefined)
       return USAGE;
-    return { cron, prompt, runOnStart: Boolean(match[5]) };
+    return { cron, timezone: match[4], prompt, runOnStart: Boolean(match[5]) };
   } catch {
     return USAGE;
   }
@@ -506,21 +515,78 @@ function loopSchedule(pi) {
     ctx.clearTimer(timer);
     timer = undefined;
   }
-  async function applyLoopMode(ctx) {
+  function persistedSchedule() {
+    if (!schedule)
+      return null;
+    if (schedule.kind === "interval")
+      return schedule;
+    return {
+      kind: "cron",
+      expression: schedule.cron.getPattern(),
+      timezone: schedule.timezone,
+      nextRunAt: schedule.nextRunAt,
+      prompt: schedule.prompt,
+      ranOnce: schedule.ranOnce
+    };
+  }
+  function persistSchedule() {
+    pi.appendEntry("loop-schedule", persistedSchedule());
+  }
+  function restoreSchedule(ctx) {
+    clearTimer(ctx);
+    schedule = undefined;
+    let saved;
+    for (const entry of ctx.sessionManager.getBranch()) {
+      if (entry.type !== "custom" || entry.customType !== "loop-schedule")
+        continue;
+      if (entry.data === null) {
+        saved = null;
+      } else if (isPersistedSchedule(entry.data)) {
+        saved = entry.data;
+      }
+    }
+    if (!saved)
+      return;
+    if (saved.kind === "interval") {
+      schedule = saved;
+    } else {
+      try {
+        schedule = {
+          kind: "cron",
+          cron: new R(saved.expression, { paused: true, timezone: saved.timezone }),
+          timezone: saved.timezone,
+          nextRunAt: saved.nextRunAt,
+          prompt: saved.prompt,
+          ranOnce: saved.ranOnce
+        };
+      } catch {
+        ctx.ui.notify("Loop schedule stopped: saved cron is invalid.", "error");
+        return;
+      }
+    }
+    arm(ctx);
+  }
+  async function applyLoopMode(ctx, prompt) {
     try {
-      const { lookup } = await import("@oh-my-pi/pi-coding-agent/config/registry");
       const mode = lookup("loop.mode")?.get(pi.pi.settings) ?? "prompt";
       if (mode === "prompt")
-        return true;
+        return "send";
       if (mode === "compact") {
         await ctx.compact();
-        return true;
+        return "send";
       }
-      const { cancelled } = await ctx.newSession();
-      return !cancelled;
+      if (ctx.deferSessionReset(prompt, async (sessionManager) => {
+        sessionManager.appendCustomEntry("loop-schedule", persistedSchedule());
+      })) {
+        return "reset";
+      }
+      schedule = undefined;
+      persistSchedule();
+      ctx.ui.notify("Loop schedule stopped: loop.mode=reset is unavailable.", "error");
+      return "stop";
     } catch (err) {
       ctx.ui.notify(`Loop schedule: failed to apply loop.mode: ${err instanceof Error ? err.message : String(err)}`, "error");
-      return false;
+      return "stop";
     }
   }
   function arm(ctx) {
@@ -539,12 +605,15 @@ function loopSchedule(pi) {
       return;
     }
     if (ctx.isIdle() && !ctx.hasPendingMessages()) {
-      const shouldSend = current.ranOnce ? await applyLoopMode(ctx) : true;
+      const action = current.ranOnce ? await applyLoopMode(ctx, current.prompt) : "send";
       if (schedule !== current)
         return;
-      if (shouldSend) {
+      if (action === "send") {
         pi.sendUserMessage(current.prompt);
+      }
+      if (action !== "stop") {
         current.ranOnce = true;
+        persistSchedule();
       }
     }
     if (current.kind === "interval") {
@@ -554,11 +623,13 @@ function loopSchedule(pi) {
       const nextRunAt = nextCronRun(current.cron, new Date);
       if (nextRunAt === undefined) {
         schedule = undefined;
+        persistSchedule();
         ctx.ui.notify("Loop schedule stopped: no future cron occurrence.", "error");
         return;
       }
       current.nextRunAt = nextRunAt;
     }
+    persistSchedule();
     arm(ctx);
   }
   pi.registerCommand("loop-schedule", {
@@ -567,6 +638,7 @@ function loopSchedule(pi) {
       if (args.trim() === "off") {
         schedule = undefined;
         clearTimer(ctx);
+        persistSchedule();
         ctx.ui.notify("Loop schedule stopped.", "info");
         return;
       }
@@ -584,6 +656,7 @@ function loopSchedule(pi) {
           return;
         }
         schedule = { kind: "cron", ...cronSchedule, nextRunAt, ranOnce: false };
+        persistSchedule();
         arm(ctx);
         ctx.ui.notify(`Loop schedule started; cron ${cronSchedule.cron.getPattern()} in ${args.trim().match(/--timezone\s+(\S+)/)?.[1]}.`, "info");
         return;
@@ -599,9 +672,16 @@ function loopSchedule(pi) {
         nextRunAt: Date.now(),
         ranOnce: false
       };
+      persistSchedule();
       arm(ctx);
       ctx.ui.notify(`Loop schedule started; repeating every ${args.trim().split(/\s+/, 1)[0]}.`, "info");
     }
+  });
+  pi.on("session_start", async (_event, ctx) => {
+    restoreSchedule(ctx);
+  });
+  pi.on("session_switch", async (_event, ctx) => {
+    restoreSchedule(ctx);
   });
 }
 export {
