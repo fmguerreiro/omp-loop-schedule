@@ -2,7 +2,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "bundle": "bun build loop-schedule.ts --outfile dist/loop-schedule.js --target=bun --format=esm --external '@oh-my-pi/pi-coding-agent' --external '@oh-my-pi/pi-coding-agent/*'"
+    "bundle": "bun build loop-schedule.ts --outfile dist/loop-schedule.js --target=bun --format=esm"
   },
   "omp": {
     "extensions": ["dist/loop-schedule.js"]

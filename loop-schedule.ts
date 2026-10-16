@@ -1,5 +1,4 @@
 import { Cron } from "croner";
-import { lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 
 type Timer = NodeJS.Timeout;
@@ -127,6 +126,27 @@ function parseCronArgs(args: string): Omit<CronSchedule, "kind" | "nextRunAt" | 
 	}
 }
 
+function loopModeFromLayer(raw: unknown): "prompt" | "compact" | "reset" | undefined {
+	if (!raw || typeof raw !== "object" || !("loop" in raw)) return;
+	const loop = raw.loop;
+	if (!loop || typeof loop !== "object" || !("mode" in loop)) return;
+	const mode = loop.mode;
+	return mode === "prompt" || mode === "compact" || mode === "reset" ? mode : undefined;
+}
+
+function settingsLayer(settings: unknown, getter: "getGlobalSettings" | "getProjectSettings"): unknown {
+	if (!settings || typeof settings !== "object" || !(getter in settings)) return;
+	const getLayer = settings[getter];
+	return typeof getLayer === "function" ? getLayer() : undefined;
+}
+
+function configuredLoopMode(settings: unknown): "prompt" | "compact" | "reset" {
+	return loopModeFromLayer(settingsLayer(settings, "getProjectSettings")) ??
+		loopModeFromLayer(settingsLayer(settings, "getGlobalSettings")) ??
+		"prompt";
+}
+
+
 export default function loopSchedule(pi: ExtensionAPI): void {
 	let schedule: Schedule | undefined;
 	let timer: Timer | undefined;
@@ -190,9 +210,7 @@ export default function loopSchedule(pi: ExtensionAPI): void {
 
 	async function applyLoopMode(ctx: ExtensionContext, prompt: string): Promise<"send" | "reset" | "stop"> {
 		try {
-			// `Settings` dropped its string-path `get(id)` accessor; extensions must
-			// resolve a typed descriptor via the registry and read through that.
-			const mode = lookup("loop.mode")?.get(pi.pi.settings) ?? "prompt";
+			const mode = configuredLoopMode(pi.pi.settings);
 			if (mode === "prompt") return "send";
 			if (mode === "compact") {
 				await ctx.compact();

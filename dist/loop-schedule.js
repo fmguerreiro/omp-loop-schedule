@@ -454,7 +454,6 @@ var R = class {
 };
 
 // loop-schedule.ts
-import { lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
 var USAGE = 'Usage: /loop-schedule <number>s|m|h|d <prompt> | /loop-schedule --cron "<minute> <hour> <day-of-month> <month> <day-of-week>" --timezone <IANA timezone> [--run-on-start] <prompt> | /loop-schedule off';
 var MAX_TIMER_MS = 2147483647;
 var UNITS_MS = {
@@ -505,6 +504,24 @@ function parseCronArgs(args) {
   } catch {
     return USAGE;
   }
+}
+function loopModeFromLayer(raw) {
+  if (!raw || typeof raw !== "object" || !("loop" in raw))
+    return;
+  const loop = raw.loop;
+  if (!loop || typeof loop !== "object" || !("mode" in loop))
+    return;
+  const mode = loop.mode;
+  return mode === "prompt" || mode === "compact" || mode === "reset" ? mode : undefined;
+}
+function settingsLayer(settings, getter) {
+  if (!settings || typeof settings !== "object" || !(getter in settings))
+    return;
+  const getLayer = settings[getter];
+  return typeof getLayer === "function" ? getLayer() : undefined;
+}
+function configuredLoopMode(settings) {
+  return loopModeFromLayer(settingsLayer(settings, "getProjectSettings")) ?? loopModeFromLayer(settingsLayer(settings, "getGlobalSettings")) ?? "prompt";
 }
 function loopSchedule(pi) {
   let schedule;
@@ -568,7 +585,7 @@ function loopSchedule(pi) {
   }
   async function applyLoopMode(ctx, prompt) {
     try {
-      const mode = lookup("loop.mode")?.get(pi.pi.settings) ?? "prompt";
+      const mode = configuredLoopMode(pi.pi.settings);
       if (mode === "prompt")
         return "send";
       if (mode === "compact") {
