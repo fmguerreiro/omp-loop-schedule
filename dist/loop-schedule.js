@@ -463,6 +463,21 @@ var UNITS_MS = {
   h: 3600000,
   d: 86400000
 };
+var WIDGET_KEY = "loop-schedule-last-run";
+var WIDGET_ICON = "\u21BB";
+var WIDGET_REFRESH_MS = 30000;
+function formatAgo(fromMs, nowMs) {
+  const deltaS = Math.max(0, Math.round((nowMs - fromMs) / 1000));
+  if (deltaS < 60)
+    return "just now";
+  const deltaM = Math.round(deltaS / 60);
+  if (deltaM < 60)
+    return `${deltaM}m ago`;
+  const deltaH = Math.round(deltaM / 60);
+  if (deltaH < 24)
+    return `${deltaH}h ago`;
+  return `${Math.round(deltaH / 24)}d ago`;
+}
 function isPersistedSchedule(value) {
   if (!value || typeof value !== "object" || !("kind" in value))
     return false;
@@ -509,6 +524,8 @@ function parseCronArgs(args) {
 function loopSchedule(pi) {
   let schedule;
   let timer;
+  let lastRunAt;
+  let requestWidgetRender;
   function clearTimer(ctx) {
     if (!timer)
       return;
@@ -565,6 +582,31 @@ function loopSchedule(pi) {
       }
     }
     arm(ctx);
+    armWidgetRefresh(ctx);
+  }
+  function armWidgetRefresh(ctx) {
+    lastRunAt = undefined;
+    ctx.ui.setWidget(WIDGET_KEY, (tui, theme) => {
+      let refreshTimer;
+      const component = {
+        render(width) {
+          const text = lastRunAt === undefined ? "no runs yet" : `last run ${formatAgo(lastRunAt, Date.now())}`;
+          const raw = `${WIDGET_ICON} ${text}`;
+          const pad = Math.max(0, width - [...raw].length);
+          return [theme.fg("muted", " ".repeat(pad) + raw)];
+        },
+        dispose() {
+          clearInterval(refreshTimer);
+          requestWidgetRender = undefined;
+        }
+      };
+      refreshTimer = setInterval(() => tui.requestComponentRender(component), WIDGET_REFRESH_MS);
+      requestWidgetRender = () => tui.requestComponentRender(component);
+      return component;
+    }, { placement: "belowEditor" });
+  }
+  function clearWidget(ctx) {
+    ctx.ui.setWidget(WIDGET_KEY, undefined);
   }
   async function applyLoopMode(ctx, prompt) {
     try {
@@ -614,6 +656,8 @@ function loopSchedule(pi) {
       if (action !== "stop") {
         current.ranOnce = true;
         persistSchedule();
+        lastRunAt = Date.now();
+        requestWidgetRender?.();
       }
     }
     if (current.kind === "interval") {
@@ -624,6 +668,7 @@ function loopSchedule(pi) {
       if (nextRunAt === undefined) {
         schedule = undefined;
         persistSchedule();
+        clearWidget(ctx);
         ctx.ui.notify("Loop schedule stopped: no future cron occurrence.", "error");
         return;
       }
@@ -639,6 +684,7 @@ function loopSchedule(pi) {
         schedule = undefined;
         clearTimer(ctx);
         persistSchedule();
+        clearWidget(ctx);
         ctx.ui.notify("Loop schedule stopped.", "info");
         return;
       }
@@ -658,6 +704,7 @@ function loopSchedule(pi) {
         schedule = { kind: "cron", ...cronSchedule, nextRunAt, ranOnce: false };
         persistSchedule();
         arm(ctx);
+        armWidgetRefresh(ctx);
         ctx.ui.notify(`Loop schedule started; cron ${cronSchedule.cron.getPattern()} in ${args.trim().match(/--timezone\s+(\S+)/)?.[1]}.`, "info");
         return;
       }
@@ -674,6 +721,7 @@ function loopSchedule(pi) {
       };
       persistSchedule();
       arm(ctx);
+      armWidgetRefresh(ctx);
       ctx.ui.notify(`Loop schedule started; repeating every ${args.trim().split(/\s+/, 1)[0]}.`, "info");
     }
   });

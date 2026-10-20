@@ -48,6 +48,8 @@ The cron expression must have exactly five fields. `--timezone` is required and 
 
 `--run-on-start` runs the prompt immediately only when command time matches the cron schedule's current minute. Otherwise, the first run is the next cron occurrence.
 
+While a schedule is active, a right-aligned `↻ last run …` indicator shows below the editor, updating roughly every 30s.
+
 ## Context between iterations
 
 The first run of each schedule sends the prompt as-is. Every run after that

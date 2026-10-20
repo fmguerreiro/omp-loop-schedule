@@ -49,6 +49,19 @@ const UNITS_MS: Record<string, number> = {
 	h: 3_600_000,
 	d: 86_400_000,
 };
+const WIDGET_KEY = "loop-schedule-last-run";
+const WIDGET_ICON = "↻";
+const WIDGET_REFRESH_MS = 30_000;
+
+function formatAgo(fromMs: number, nowMs: number): string {
+	const deltaS = Math.max(0, Math.round((nowMs - fromMs) / 1000));
+	if (deltaS < 60) return "just now";
+	const deltaM = Math.round(deltaS / 60);
+	if (deltaM < 60) return `${deltaM}m ago`;
+	const deltaH = Math.round(deltaM / 60);
+	if (deltaH < 24) return `${deltaH}h ago`;
+	return `${Math.round(deltaH / 24)}d ago`;
+}
 
 function isPersistedSchedule(value: unknown): value is PersistedSchedule {
 	if (!value || typeof value !== "object" || !("kind" in value)) return false;
@@ -130,6 +143,8 @@ function parseCronArgs(args: string): Omit<CronSchedule, "kind" | "nextRunAt" | 
 export default function loopSchedule(pi: ExtensionAPI): void {
 	let schedule: Schedule | undefined;
 	let timer: Timer | undefined;
+	let lastRunAt: number | undefined;
+	let requestWidgetRender: (() => void) | undefined;
 
 	function clearTimer(ctx: ExtensionContext): void {
 		if (!timer) return;
@@ -186,6 +201,37 @@ export default function loopSchedule(pi: ExtensionAPI): void {
 			}
 		}
 		arm(ctx);
+		armWidgetRefresh(ctx);
+	}
+
+	function armWidgetRefresh(ctx: ExtensionContext): void {
+		lastRunAt = undefined;
+		ctx.ui.setWidget(
+			WIDGET_KEY,
+			(tui, theme) => {
+				let refreshTimer: Timer | undefined;
+				const component = {
+					render(width: number): readonly string[] {
+						const text = lastRunAt === undefined ? "no runs yet" : `last run ${formatAgo(lastRunAt, Date.now())}`;
+						const raw = `${WIDGET_ICON} ${text}`;
+						const pad = Math.max(0, width - [...raw].length);
+						return [theme.fg("muted", " ".repeat(pad) + raw)];
+					},
+					dispose(): void {
+						clearInterval(refreshTimer);
+						requestWidgetRender = undefined;
+					},
+				};
+				refreshTimer = setInterval(() => tui.requestComponentRender(component), WIDGET_REFRESH_MS);
+				requestWidgetRender = () => tui.requestComponentRender(component);
+				return component;
+			},
+			{ placement: "belowEditor" },
+		);
+	}
+
+	function clearWidget(ctx: ExtensionContext): void {
+		ctx.ui.setWidget(WIDGET_KEY, undefined);
 	}
 
 	async function applyLoopMode(ctx: ExtensionContext, prompt: string): Promise<"send" | "reset" | "stop"> {
@@ -246,6 +292,8 @@ export default function loopSchedule(pi: ExtensionAPI): void {
 			if (action !== "stop") {
 				current.ranOnce = true;
 				persistSchedule();
+				lastRunAt = Date.now();
+				requestWidgetRender?.();
 			}
 		}
 
@@ -256,6 +304,7 @@ export default function loopSchedule(pi: ExtensionAPI): void {
 			if (nextRunAt === undefined) {
 				schedule = undefined;
 				persistSchedule();
+				clearWidget(ctx);
 				ctx.ui.notify("Loop schedule stopped: no future cron occurrence.", "error");
 				return;
 			}
@@ -274,6 +323,7 @@ export default function loopSchedule(pi: ExtensionAPI): void {
 				schedule = undefined;
 				clearTimer(ctx);
 				persistSchedule();
+				clearWidget(ctx);
 				ctx.ui.notify("Loop schedule stopped.", "info");
 				return;
 			}
@@ -298,6 +348,7 @@ export default function loopSchedule(pi: ExtensionAPI): void {
 				schedule = { kind: "cron", ...cronSchedule, nextRunAt, ranOnce: false };
 				persistSchedule();
 				arm(ctx);
+				armWidgetRefresh(ctx);
 				ctx.ui.notify(
 					`Loop schedule started; cron ${cronSchedule.cron.getPattern()} in ${args.trim().match(/--timezone\s+(\S+)/)?.[1]}.`,
 					"info",
@@ -319,6 +370,7 @@ export default function loopSchedule(pi: ExtensionAPI): void {
 			};
 			persistSchedule();
 			arm(ctx);
+			armWidgetRefresh(ctx);
 			ctx.ui.notify(`Loop schedule started; repeating every ${args.trim().split(/\s+/, 1)[0]}.`, "info");
 		},
 	});
