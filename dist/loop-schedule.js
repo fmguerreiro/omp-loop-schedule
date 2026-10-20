@@ -454,7 +454,6 @@ var R = class {
 };
 
 // loop-schedule.ts
-import { lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
 var USAGE = 'Usage: /loop-schedule <number>s|m|h|d <prompt> | /loop-schedule --cron "<minute> <hour> <day-of-month> <month> <day-of-week>" --timezone <IANA timezone> [--run-on-start] <prompt> | /loop-schedule off';
 var MAX_TIMER_MS = 2147483647;
 var UNITS_MS = {
@@ -466,6 +465,10 @@ var UNITS_MS = {
 var WIDGET_KEY = "loop-schedule-last-run";
 var WIDGET_ICON = "\u21BB";
 var WIDGET_REFRESH_MS = 30000;
+var LOOP_MODE_SETTING = {
+  segments: ["loop", "mode"],
+  definition: { pathScoped: false }
+};
 function formatAgo(fromMs, nowMs) {
   const deltaS = Math.max(0, Math.round((nowMs - fromMs) / 1000));
   if (deltaS < 60)
@@ -610,7 +613,10 @@ function loopSchedule(pi) {
   }
   async function applyLoopMode(ctx) {
     try {
-      const mode = lookup("loop.mode")?.get(pi.pi.settings) ?? "prompt";
+      const settings = pi.pi.settings;
+      const rawValue = settings && typeof settings === "object" && "rawValue" in settings && typeof settings.rawValue === "function" ? settings.rawValue : undefined;
+      const value = rawValue?.(LOOP_MODE_SETTING);
+      const mode = value === "compact" || value === "reset" ? value : "prompt";
       if (mode === "prompt")
         return "send";
       if (mode === "compact") {

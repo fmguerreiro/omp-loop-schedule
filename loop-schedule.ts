@@ -1,5 +1,4 @@
 import { Cron } from "croner";
-import { lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 
 type Timer = NodeJS.Timeout;
@@ -52,6 +51,12 @@ const UNITS_MS: Record<string, number> = {
 const WIDGET_KEY = "loop-schedule-last-run";
 const WIDGET_ICON = "↻";
 const WIDGET_REFRESH_MS = 30_000;
+
+const LOOP_MODE_SETTING = {
+	segments: ["loop", "mode"],
+	definition: { pathScoped: false },
+} as const;
+
 
 function formatAgo(fromMs: number, nowMs: number): string {
 	const deltaS = Math.max(0, Math.round((nowMs - fromMs) / 1000));
@@ -236,9 +241,16 @@ export default function loopSchedule(pi: ExtensionAPI): void {
 
 	async function applyLoopMode(ctx: ExtensionContext): Promise<"send" | "stop"> {
 		try {
-			// `Settings` dropped its string-path `get(id)` accessor; extensions must
-			// resolve a typed descriptor via the registry and read through that.
-			const mode = lookup("loop.mode")?.get(pi.pi.settings) ?? "prompt";
+			const settings: unknown = pi.pi.settings;
+			const rawValue =
+				settings &&
+				typeof settings === "object" &&
+				"rawValue" in settings &&
+				typeof settings.rawValue === "function"
+					? settings.rawValue
+					: undefined;
+			const value = rawValue?.(LOOP_MODE_SETTING);
+			const mode = value === "compact" || value === "reset" ? value : "prompt";
 			if (mode === "prompt") return "send";
 			if (mode === "compact") {
 				await ctx.compact();
