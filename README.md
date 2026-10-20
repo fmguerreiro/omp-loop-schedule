@@ -54,13 +54,17 @@ While a schedule is active, a right-aligned `↻ last run …` indicator shows b
 
 The first run of each schedule sends the prompt as-is. Every run after that
 applies Oh My Pi's `loop.mode` setting first, same as the builtin `/loop`
-command: `prompt` (default) sends as-is, `compact` compacts context first,
-`reset` starts a new session first. `reset` means each iteration after the
-first runs in a fresh session with no memory of prior runs.
+command: `prompt` (default) sends as-is; `compact` compacts context first.
+
+`loop.mode: reset` is unavailable for scheduled runs in current Oh My Pi:
+extensions may reset a session only from a user-initiated command. The schedule
+stops before its next repeat and displays an error. Use `prompt` or `compact`
+for scheduled runs.
 
 ## Session transfers
 
-Active schedules are stored with the session and restored when Oh My Pi opens a transferred session. With `loop.mode: reset`, every iteration after the first creates a fresh session and sends the scheduled prompt there. `/loop-schedule off` records that no schedule is active.
+Active schedules are stored with the session and restored when Oh My Pi opens a
+transferred session. `/loop-schedule off` records that no schedule is active.
 
 Stop active schedule:
 

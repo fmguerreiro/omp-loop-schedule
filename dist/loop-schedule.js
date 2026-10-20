@@ -608,7 +608,7 @@ function loopSchedule(pi) {
   function clearWidget(ctx) {
     ctx.ui.setWidget(WIDGET_KEY, undefined);
   }
-  async function applyLoopMode(ctx, prompt) {
+  async function applyLoopMode(ctx) {
     try {
       const mode = lookup("loop.mode")?.get(pi.pi.settings) ?? "prompt";
       if (mode === "prompt")
@@ -617,13 +617,9 @@ function loopSchedule(pi) {
         await ctx.compact();
         return "send";
       }
-      if (ctx.deferSessionReset(prompt, async (sessionManager) => {
-        sessionManager.appendCustomEntry("loop-schedule", persistedSchedule());
-      })) {
-        return "reset";
-      }
       schedule = undefined;
       persistSchedule();
+      clearWidget(ctx);
       ctx.ui.notify("Loop schedule stopped: loop.mode=reset is unavailable.", "error");
       return "stop";
     } catch (err) {
@@ -647,7 +643,7 @@ function loopSchedule(pi) {
       return;
     }
     if (ctx.isIdle() && !ctx.hasPendingMessages()) {
-      const action = current.ranOnce ? await applyLoopMode(ctx, current.prompt) : "send";
+      const action = current.ranOnce ? await applyLoopMode(ctx) : "send";
       if (schedule !== current)
         return;
       if (action === "send") {

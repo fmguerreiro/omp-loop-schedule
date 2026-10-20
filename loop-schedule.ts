@@ -234,7 +234,7 @@ export default function loopSchedule(pi: ExtensionAPI): void {
 		ctx.ui.setWidget(WIDGET_KEY, undefined);
 	}
 
-	async function applyLoopMode(ctx: ExtensionContext, prompt: string): Promise<"send" | "reset" | "stop"> {
+	async function applyLoopMode(ctx: ExtensionContext): Promise<"send" | "stop"> {
 		try {
 			// `Settings` dropped its string-path `get(id)` accessor; extensions must
 			// resolve a typed descriptor via the registry and read through that.
@@ -244,15 +244,9 @@ export default function loopSchedule(pi: ExtensionAPI): void {
 				await ctx.compact();
 				return "send";
 			}
-			if (
-				ctx.deferSessionReset(prompt, async sessionManager => {
-					sessionManager.appendCustomEntry("loop-schedule", persistedSchedule());
-				})
-			) {
-				return "reset";
-			}
 			schedule = undefined;
 			persistSchedule();
+			clearWidget(ctx);
 			ctx.ui.notify("Loop schedule stopped: loop.mode=reset is unavailable.", "error");
 			return "stop";
 		} catch (err) {
@@ -284,7 +278,7 @@ export default function loopSchedule(pi: ExtensionAPI): void {
 		}
 
 		if (ctx.isIdle() && !ctx.hasPendingMessages()) {
-			const action = current.ranOnce ? await applyLoopMode(ctx, current.prompt) : "send";
+			const action = current.ranOnce ? await applyLoopMode(ctx) : "send";
 			if (schedule !== current) return;
 			if (action === "send") {
 				pi.sendUserMessage(current.prompt);
